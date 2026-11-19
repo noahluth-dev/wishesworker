@@ -1,0 +1,19 @@
+name = "wishcraft-api"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "wishcraft"
+database_id = "534b420d-3d93-4298-a889-a2d3be775c23"
+
+[[r2_buckets]]
+binding = "wishcraft_images"
+bucket_name = "wishcraft-images"
+
+# Secrets (set via `wrangler secret put`, NOT here):
+#   JWT_SECRET      long random string (openssl rand -base64 48)
+#   MASTER_SECRET   long random string (your provisioning password)
+# Optional vars:
+# [vars]
+# R2_PUBLIC_URL = "https://pub-xxxx.r2.dev"   # only if you enable public R2 access
