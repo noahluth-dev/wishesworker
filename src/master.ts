@@ -11,8 +11,10 @@ import {
 } from "./lib";
 
 async function bodyJson<T = Record<string, unknown>>(request: Request): Promise<T> {
+  const text = await request.text();
+  if (!text.trim()) return {} as T;
   try {
-    return (await request.json()) as T;
+    return JSON.parse(text) as T;
   } catch {
     throw new HttpError(400, "Invalid JSON");
   }

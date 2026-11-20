@@ -35,7 +35,17 @@ export default {
 
     try {
       // Health
-      if (url.pathname === "/api/health") return json({ ok: true });
+      if (url.pathname === "/api/health") {
+        return json({
+          ok: true,
+          configured: {
+            db: !!env.DB,
+            images: !!env.IMAGES,
+            jwtSecret: !!env.JWT_SECRET,
+            masterSecret: !!env.MASTER_SECRET,
+          },
+        });
+      }
 
       // Public
       if (parts[0] === "api" && parts[1] === "public") {
@@ -59,26 +69,25 @@ export default {
         if (action === "me" && method === "GET") return await getMe(request, env);
         if (action === "stats" && method === "GET") return await getStats(request, env);
         if (action === "campaigns") {
-          if (method === "GET") return await listCampaigns(request, env);
-          if (method === "POST") return await createCampaign(request, env);
-        }
-        if (action === "campaigns" && parts[3]) {
-          const campaignId = parts[3];
-          const sub = parts[4];
-          if (!sub) {
-            if (method === "GET") return await getCampaign(request, env, campaignId);
-            if (method === "PATCH") return await updateCampaign(request, env, campaignId);
-            if (method === "DELETE") return await deleteCampaign(request, env, campaignId);
+          if (parts.length === 3) {
+            if (method === "GET") return await listCampaigns(request, env);
+            if (method === "POST") return await createCampaign(request, env);
           }
-          if (sub === "publish" && method === "POST")
-            return await publishCampaign(request, env, campaignId);
-          if (sub === "unpublish" && method === "POST")
-            return await unpublishCampaign(request, env, campaignId);
-          if (sub === "image" && method === "POST")
-            return await uploadCampaignImage(request, env, campaignId);
-          if (sub === "recipients") {
-            if (method === "GET") return await listRecipients(request, env, campaignId);
-            if (method === "POST") return await addRecipients(request, env, campaignId);
+          if (parts[3]) {
+            const campaignId = parts[3];
+            const sub = parts[4];
+            if (!sub) {
+              if (method === "GET") return await getCampaign(request, env, campaignId);
+              if (method === "PATCH") return await updateCampaign(request, env, campaignId);
+              if (method === "DELETE") return await deleteCampaign(request, env, campaignId);
+            }
+            if (sub === "publish" && method === "POST") return await publishCampaign(request, env, campaignId);
+            if (sub === "unpublish" && method === "POST") return await unpublishCampaign(request, env, campaignId);
+            if (sub === "image" && method === "POST") return await uploadCampaignImage(request, env, campaignId);
+            if (sub === "recipients") {
+              if (method === "GET") return await listRecipients(request, env, campaignId);
+              if (method === "POST") return await addRecipients(request, env, campaignId);
+            }
           }
         }
         if (action === "recipients" && parts[3]) {

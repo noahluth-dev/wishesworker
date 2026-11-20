@@ -8,7 +8,7 @@ database_name = "wishcraft"
 database_id = "534b420d-3d93-4298-a889-a2d3be775c23"
 
 [[r2_buckets]]
-binding = "wishcraft_images"
+binding = "IMAGES"
 bucket_name = "wishcraft-images"
 
 # Secrets (set via `wrangler secret put`, NOT here):

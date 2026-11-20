@@ -16,8 +16,10 @@ import {
 } from "./lib";
 
 async function bodyJson<T = Record<string, unknown>>(request: Request): Promise<T> {
+  const text = await request.text();
+  if (!text.trim()) return {} as T;
   try {
-    return (await request.json()) as T;
+    return JSON.parse(text) as T;
   } catch {
     throw new HttpError(400, "Invalid JSON");
   }
@@ -244,7 +246,7 @@ export async function deleteCampaign(
   );
   if (!existing) throw new HttpError(404, "Campaign not found");
   if (existing.image_key) {
-    await env.IMAGES.delete(existing.image_key).catch(() => {});
+    await env.IMAGES.delete(existing.image_key).catch(() => { });
   }
   await dbRun(env.DB, "DELETE FROM campaigns WHERE id = ? AND tenant_id = ?", campaignId, tenantId);
   return json({ ok: true });
@@ -314,8 +316,17 @@ export async function uploadCampaignImage(
   if (!campaign) throw new HttpError(404, "Campaign not found");
 
   const form = await request.formData();
-  const file = form.get("image");
-  if (!(file instanceof File)) throw new HttpError(400, "Missing 'image' file");
+  const raw = form.get("image");
+  // FormData entries are string | File. Strings happen when a text field
+  // is submitted with the same name, so reject them explicitly.
+  if (raw === null || typeof raw === "string") {
+    throw new HttpError(400, "Missing 'image' file");
+  }
+  const file = raw as unknown as {
+    size: number;
+    type: string;
+    arrayBuffer(): Promise<ArrayBuffer>;
+  };
   if (file.size > 5 * 1024 * 1024) throw new HttpError(413, "Image must be ≤5 MB");
   const allowed = ["image/jpeg", "image/png", "image/webp"];
   if (!allowed.includes(file.type)) throw new HttpError(400, "Only JPG, PNG, or WebP");
@@ -326,7 +337,7 @@ export async function uploadCampaignImage(
     httpMetadata: { contentType: file.type },
   });
   if (campaign.image_key) {
-    await env.IMAGES.delete(campaign.image_key).catch(() => {});
+    await env.IMAGES.delete(campaign.image_key).catch(() => { });
   }
   await dbRun(
     env.DB,
