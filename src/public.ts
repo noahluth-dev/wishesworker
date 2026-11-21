@@ -8,6 +8,10 @@ import {
   dbFirst,
   dbRun,
   imageUrl,
+  themeImageUrl,
+  giftImageUrl,
+  sceneImageUrl,
+  getTenantPlan,
 } from "./lib";
 
 async function bodyJson<T = Record<string, unknown>>(request: Request): Promise<T> {
@@ -69,7 +73,7 @@ async function resolveToken(env: Env, token: string): Promise<TokenLookup> {
   throw new HttpError(404, "This link is not valid.");
 }
 
-function shapeExperience(
+async function shapeExperience(
   env: Env,
   request: Request,
   lookup: TokenLookup,
@@ -77,6 +81,7 @@ function shapeExperience(
 ) {
   const { campaign, recipient, isPreview } = lookup;
   const isInvitation = campaign.type === "invitation";
+  const { plan } = await getTenantPlan(env.DB, campaign.tenant_id);
   return {
     campaignId: campaign.id,
     type: campaign.type,
@@ -84,28 +89,32 @@ function shapeExperience(
     senderName: campaign.sender_name,
     revealMessage: campaign.reveal_message,
     imageUrl: imageUrl(env, request, campaign),
+    themeImageUrl: themeImageUrl(env, request, campaign),
+    giftImageUrl: giftImageUrl(env, request, campaign),   
+    sceneImageUrl: sceneImageUrl(env, request, campaign), 
     recipientName: recipient?.name ?? null,
     event:
       isInvitation && campaign.event_title
         ? {
-            title: campaign.event_title,
-            description: campaign.event_description,
-            date: campaign.event_date,
-            time: campaign.event_time,
-            location: campaign.event_location,
-          }
+          title: campaign.event_title,
+          description: campaign.event_description,
+          date: campaign.event_date,
+          time: campaign.event_time,
+          location: campaign.event_location,
+        }
         : null,
     rsvpEnabled: isInvitation && campaign.rsvp_enabled === 1,
     rsvpState:
       recipient && recipient.rsvped_at
         ? {
-            submitted: true,
-            status: recipient.rsvp_status,
-            guestCount: recipient.rsvp_guest_count,
-            message: recipient.rsvp_message,
-          }
+          submitted: true,
+          status: recipient.rsvp_status,
+          guestCount: recipient.rsvp_guest_count,
+          message: recipient.rsvp_message,
+        }
         : { submitted: false },
     token,
+    watermark: plan.watermark,
   };
 }
 
@@ -285,6 +294,72 @@ export async function getImage(request: Request, env: Env, campaignId: string): 
   );
   if (!campaign?.image_key) return new Response("Not found", { status: 404 });
   const obj = await env.IMAGES.get(campaign.image_key);
+  if (!obj) return new Response("Not found", { status: 404 });
+  return new Response(obj.body, {
+    headers: {
+      "Content-Type": obj.httpMetadata?.contentType ?? "application/octet-stream",
+      "Cache-Control": "public, max-age=31536000, immutable",
+    },
+  });
+}
+
+// GET /api/theme-image/:campaignId
+export async function getThemeImage(
+  request: Request,
+  env: Env,
+  campaignId: string,
+): Promise<Response> {
+  const campaign = await dbFirst<Campaign>(
+    env.DB,
+    "SELECT * FROM campaigns WHERE id = ?",
+    campaignId,
+  );
+  if (!campaign?.theme_image_key) return new Response("Not found", { status: 404 });
+  const obj = await env.IMAGES.get(campaign.theme_image_key);
+  if (!obj) return new Response("Not found", { status: 404 });
+  return new Response(obj.body, {
+    headers: {
+      "Content-Type": obj.httpMetadata?.contentType ?? "application/octet-stream",
+      "Cache-Control": "public, max-age=31536000, immutable",
+    },
+  });
+}
+
+// GET /api/gift-image/:campaignId
+export async function getGiftImage(
+  request: Request,
+  env: Env,
+  campaignId: string,
+): Promise<Response> {
+  const campaign = await dbFirst<Campaign>(
+    env.DB,
+    "SELECT * FROM campaigns WHERE id = ?",
+    campaignId,
+  );
+  if (!campaign?.gift_image_key) return new Response("Not found", { status: 404 });
+  const obj = await env.IMAGES.get(campaign.gift_image_key);
+  if (!obj) return new Response("Not found", { status: 404 });
+  return new Response(obj.body, {
+    headers: {
+      "Content-Type": obj.httpMetadata?.contentType ?? "application/octet-stream",
+      "Cache-Control": "public, max-age=31536000, immutable",
+    },
+  });
+}
+
+// GET /api/scene-image/:campaignId
+export async function getSceneImage(
+  request: Request,
+  env: Env,
+  campaignId: string,
+): Promise<Response> {
+  const campaign = await dbFirst<Campaign>(
+    env.DB,
+    "SELECT * FROM campaigns WHERE id = ?",
+    campaignId,
+  );
+  if (!campaign?.scene_image_key) return new Response("Not found", { status: 404 });
+  const obj = await env.IMAGES.get(campaign.scene_image_key);
   if (!obj) return new Response("Not found", { status: 404 });
   return new Response(obj.body, {
     headers: {

@@ -29,6 +29,12 @@ export interface Campaign {
   reveal_message: string;
   image_key: string | null;
   image_content_type: string | null;
+  theme_image_key: string | null;
+  theme_image_content_type: string | null;
+  gift_image_key: string | null;             
+  gift_image_content_type: string | null;   
+  scene_image_key: string | null;             
+  scene_image_content_type: string | null;    
   event_title: string | null;
   event_description: string | null;
   event_date: string | null;
@@ -265,4 +271,42 @@ export async function dbRun(
   ...params: unknown[]
 ): Promise<void> {
   await db.prepare(sql).bind(...params).run();
+}
+
+export function themeImageUrl(env: Env, request: Request, campaign: Campaign): string | null {
+  if (!campaign.theme_image_key) return null;
+  if (env.R2_PUBLIC_URL) return `${env.R2_PUBLIC_URL}/${campaign.theme_image_key}`;
+  const origin = new URL(request.url).origin;
+  return `${origin}/api/theme-image/${campaign.id}`;
+}
+
+export function giftImageUrl(env: Env, request: Request, campaign: Campaign): string | null {
+  if (!campaign.gift_image_key) return null;
+  if (env.R2_PUBLIC_URL) return `${env.R2_PUBLIC_URL}/${campaign.gift_image_key}`;
+  const origin = new URL(request.url).origin;
+  return `${origin}/api/gift-image/${campaign.id}`;
+}
+
+export function sceneImageUrl(env: Env, request: Request, campaign: Campaign): string | null {
+  if (!campaign.scene_image_key) return null;
+  if (env.R2_PUBLIC_URL) return `${env.R2_PUBLIC_URL}/${campaign.scene_image_key}`;
+  const origin = new URL(request.url).origin;
+  return `${origin}/api/scene-image/${campaign.id}`;
+}
+
+// wishcraft-worker/src/lib.ts
+export const PLANS = {
+  free:     { maxCampaigns: 1,        maxRecipientsPerCampaign: 20,    watermark: true,  label: "Trial" },
+  starter:  { maxCampaigns: 5,        maxRecipientsPerCampaign: 100,    watermark: true,  label: "Starter" },
+  pro:      { maxCampaigns: 25,       maxRecipientsPerCampaign: 200,   watermark: false, label: "Pro" },
+  business: { maxCampaigns: 1_000_000, maxRecipientsPerCampaign: 1_000_000, watermark: false, label: "Business" },
+} as const;
+
+export type PlanId = keyof typeof PLANS;
+
+export async function getTenantPlan(db: D1Database, tenantId: string) {
+  const row = await dbFirst<{ plan: string }>(db, "SELECT plan FROM tenants WHERE id = ?", tenantId);
+  const planId = (row?.plan ?? "free") as PlanId;
+  const plan = PLANS[planId] ?? PLANS.free;
+  return { planId, plan };
 }

@@ -1,5 +1,5 @@
 import { Env, HttpError, json, preflight } from "./lib";
-import { postExperience, postMarkOpened, postMarkScratched, postRsvp, getImage } from "./public";
+import { postExperience, postMarkOpened, postMarkScratched, postRsvp, getImage, getThemeImage, getGiftImage, getSceneImage, } from "./public";
 import {
   postLogin,
   getMe,
@@ -11,18 +11,22 @@ import {
   publishCampaign,
   unpublishCampaign,
   uploadCampaignImage,
+  uploadThemeImage,
   listRecipients,
   addRecipients,
   updateRecipient,
   deleteRecipient,
   regenerateRecipientToken,
   getStats,
+  uploadGiftImage,
+  uploadSceneImage,
 } from "./admin";
 import {
   postProvision,
   listTenants,
   deleteTenant,
   resetTenantPassword,
+  updateTenantPlan
 } from "./master";
 
 export default {
@@ -62,6 +66,17 @@ export default {
         return await getImage(request, env, parts[2]);
       }
 
+      if (parts[0] === "api" && parts[1] === "theme-image" && parts[2] && method === "GET") {
+        return await getThemeImage(request, env, parts[2]);
+      }
+
+      if (parts[0] === "api" && parts[1] === "gift-image" && parts[2] && method === "GET") {
+        return await getGiftImage(request, env, parts[2]);
+      }
+      if (parts[0] === "api" && parts[1] === "scene-image" && parts[2] && method === "GET") {
+        return await getSceneImage(request, env, parts[2]);
+      }
+
       // Admin
       if (parts[0] === "api" && parts[1] === "admin") {
         const action = parts[2];
@@ -84,6 +99,12 @@ export default {
             if (sub === "publish" && method === "POST") return await publishCampaign(request, env, campaignId);
             if (sub === "unpublish" && method === "POST") return await unpublishCampaign(request, env, campaignId);
             if (sub === "image" && method === "POST") return await uploadCampaignImage(request, env, campaignId);
+            if (sub === "theme-image" && method === "POST")
+              return await uploadThemeImage(request, env, campaignId);
+            if (sub === "gift-image" && method === "POST")            // NEW
+              return await uploadGiftImage(request, env, campaignId);  // NEW
+            if (sub === "scene-image" && method === "POST")           // NEW
+              return await uploadSceneImage(request, env, campaignId); // NEW
             if (sub === "recipients") {
               if (method === "GET") return await listRecipients(request, env, campaignId);
               if (method === "POST") return await addRecipients(request, env, campaignId);
@@ -110,8 +131,8 @@ export default {
             const slug = parts[3];
             const sub = parts[4];
             if (!sub && method === "DELETE") return await deleteTenant(request, env, slug);
-            if (sub === "reset-password" && method === "POST")
-              return await resetTenantPassword(request, env, slug);
+            if (sub === "reset-password" && method === "POST") return await resetTenantPassword(request, env, slug);
+            if (sub === "plan" && method === "POST") return await updateTenantPlan(request, env, slug);
           }
         }
       }

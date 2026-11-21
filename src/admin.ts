@@ -13,6 +13,10 @@ import {
   dbAll,
   dbRun,
   imageUrl,
+  themeImageUrl,
+  giftImageUrl,
+  sceneImageUrl,
+  getTenantPlan,
 } from "./lib";
 
 async function bodyJson<T = Record<string, unknown>>(request: Request): Promise<T> {
@@ -62,12 +66,24 @@ export async function postLogin(request: Request, env: Env): Promise<Response> {
 // GET /api/admin/me
 export async function getMe(request: Request, env: Env): Promise<Response> {
   const { tenantId } = await requireAuth(request, env);
-  const tenant = await dbFirst<{ slug: string; customer_name: string }>(
+  const tenant = await dbFirst<{ slug: string; customer_name: string; plan: string }>(
     env.DB,
-    "SELECT slug, customer_name FROM tenants WHERE id = ?",
+    "SELECT slug, customer_name, plan FROM tenants WHERE id = ?",
     tenantId,
   );
-  return json({ tenant });
+  const { planId, plan } = await getTenantPlan(env.DB, tenantId);
+  return json({
+    tenant: {
+      ...tenant,
+      planId,
+      planLabel: plan.label,
+      limits: {
+        maxCampaigns: plan.maxCampaigns,
+        maxRecipientsPerCampaign: plan.maxRecipientsPerCampaign,
+      },
+      watermark: plan.watermark,
+    },
+  });
 }
 
 // GET /api/admin/campaigns
@@ -97,6 +113,9 @@ export async function listCampaigns(request: Request, env: Env): Promise<Respons
       recipientCount: cMap.get(c.id) ?? 0,
       openedCount: oMap.get(c.id) ?? 0,
       imageUrl: imageUrl(env, request, c),
+      themeImageUrl: themeImageUrl(env, request, c),
+      giftImageUrl: giftImageUrl(env, request, c),
+      sceneImageUrl: sceneImageUrl(env, request, c),
     })),
   });
 }
@@ -104,6 +123,21 @@ export async function listCampaigns(request: Request, env: Env): Promise<Respons
 // POST /api/admin/campaigns
 export async function createCampaign(request: Request, env: Env): Promise<Response> {
   const { tenantId } = await requireAuth(request, env);
+
+  // Plan enforcement
+  const { planId, plan } = await getTenantPlan(env.DB, tenantId);
+  const count = await dbFirst<{ n: number }>(
+    env.DB,
+    "SELECT COUNT(*) as n FROM campaigns WHERE tenant_id = ?",
+    tenantId,
+  );
+  const current = count?.n ?? 0;
+  if (current >= plan.maxCampaigns) {
+    throw new HttpError(
+      403,
+      `Campaign limit reached (${current}/${plan.maxCampaigns} on ${plan.label} plan). Contact the operator to upgrade.`,
+    );
+  }
   const body = await bodyJson<{
     type?: "wish" | "invitation";
     name?: string;
@@ -171,7 +205,10 @@ export async function getCampaign(
     tenantId,
   );
   if (!campaign) throw new HttpError(404, "Campaign not found");
-  return json({ campaign, imageUrl: imageUrl(env, request, campaign) });
+  return json({
+    campaign, imageUrl: imageUrl(env, request, campaign), themeImageUrl: themeImageUrl(env, request, campaign), giftImageUrl: giftImageUrl(env, request, campaign),
+    sceneImageUrl: sceneImageUrl(env, request, campaign)
+  });
 }
 
 // PATCH /api/admin/campaigns/:id
@@ -228,7 +265,10 @@ export async function updateCampaign(
     ...params,
   );
   const campaign = await dbFirst<Campaign>(env.DB, "SELECT * FROM campaigns WHERE id = ?", campaignId);
-  return json({ campaign, imageUrl: imageUrl(env, request, campaign!) });
+  return json({
+    campaign, imageUrl: imageUrl(env, request, campaign!), themeImageUrl: themeImageUrl(env, request, campaign!), giftImageUrl: giftImageUrl(env, request, campaign!),
+    sceneImageUrl: sceneImageUrl(env, request, campaign!)
+  });
 }
 
 // DELETE /api/admin/campaigns/:id
@@ -247,6 +287,15 @@ export async function deleteCampaign(
   if (!existing) throw new HttpError(404, "Campaign not found");
   if (existing.image_key) {
     await env.IMAGES.delete(existing.image_key).catch(() => { });
+  }
+  if (existing.theme_image_key) {
+    await env.IMAGES.delete(existing.theme_image_key).catch(() => { });
+  }
+  if (existing.gift_image_key) {                                     // NEW
+    await env.IMAGES.delete(existing.gift_image_key).catch(() => { }); // NEW
+  }                                                                  // NEW
+  if (existing.scene_image_key) {                                    // NEW
+    await env.IMAGES.delete(existing.scene_image_key).catch(() => { }); // NEW
   }
   await dbRun(env.DB, "DELETE FROM campaigns WHERE id = ? AND tenant_id = ?", campaignId, tenantId);
   return json({ ok: true });
@@ -396,7 +445,7 @@ export async function addRecipients(
   const cleaned = incoming.map((n) => n.trim()).filter((n) => n.length > 0);
   if (cleaned.length === 0) throw new HttpError(400, "No names provided");
 
-  // Dedupe against existing
+  // Dedupe against existing (within this request AND against the DB)
   const existing = await dbAll<{ lower_name: string }>(
     env.DB,
     "SELECT LOWER(name) AS lower_name FROM recipients WHERE campaign_id = ?",
@@ -406,13 +455,36 @@ export async function addRecipients(
   const toAdd: string[] = [];
   const skipped: string[] = [];
   for (const name of cleaned) {
-    if (existingSet.has(name.toLowerCase())) skipped.push(name);
-    else {
+    if (existingSet.has(name.toLowerCase())) {
+      skipped.push(name);
+    } else {
       existingSet.add(name.toLowerCase());
       toAdd.push(name);
     }
   }
 
+  // Plan enforcement — check AFTER dedupe so duplicates don't consume quota.
+  // A user re-pasting a list of 20 names where 18 are already added
+  // only needs 2 slots, not 20.
+  if (toAdd.length > 0) {
+    const { plan } = await getTenantPlan(env.DB, tenantId);
+    const existingCount = existing.length;
+    const remaining = plan.maxRecipientsPerCampaign - existingCount;
+
+    if (toAdd.length > remaining) {
+      const limitLabel =
+        plan.maxRecipientsPerCampaign >= 1_000_000
+          ? "unlimited"
+          : String(plan.maxRecipientsPerCampaign);
+      const msg =
+        remaining <= 0
+          ? `Recipient limit reached (${existingCount}/${limitLabel} on ${plan.label} plan). Contact the operator to upgrade.`
+          : `Only ${remaining} recipient slot${remaining === 1 ? "" : "s"} left (${existingCount}/${limitLabel} on ${plan.label} plan). You tried to add ${toAdd.length} new name${toAdd.length === 1 ? "" : "s"}.`;
+      throw new HttpError(403, msg);
+    }
+  }
+
+  // Insert new recipients in chunks of 25 (D1 bind parameter limit)
   const CHUNK = 25;
   const ts = now();
   for (let i = 0; i < toAdd.length; i += CHUNK) {
@@ -429,12 +501,17 @@ export async function addRecipients(
     );
   }
 
-  const added = await dbAll<Recipient>(
-    env.DB,
-    "SELECT * FROM recipients WHERE campaign_id = ? ORDER BY created_at DESC LIMIT ?",
-    campaignId,
-    toAdd.length || 1,
-  );
+  // Return the newly-created recipients so the UI can render them immediately.
+  const added =
+    toAdd.length === 0
+      ? []
+      : await dbAll<Recipient>(
+          env.DB,
+          "SELECT * FROM recipients WHERE campaign_id = ? ORDER BY created_at DESC LIMIT ?",
+          campaignId,
+          toAdd.length,
+        );
+
   return json({ added: added.length, skipped, recipients: added });
 }
 
@@ -494,6 +571,7 @@ export async function regenerateRecipientToken(
 // GET /api/admin/stats
 export async function getStats(request: Request, env: Env): Promise<Response> {
   const { tenantId } = await requireAuth(request, env);
+  const { planId, plan } = await getTenantPlan(env.DB, tenantId);
   const totals = await dbFirst<{ total: number; published: number }>(
     env.DB,
     "SELECT COUNT(*) as total, SUM(CASE WHEN status = 'published' THEN 1 ELSE 0 END) as published FROM campaigns WHERE tenant_id = ?",
@@ -548,5 +626,160 @@ export async function getStats(request: Request, env: Env): Promise<Response> {
       scratches: wishOpens?.scratches ?? 0,
     },
     recentActivity,
+    plan: {
+    id: planId,
+    label: plan.label,
+    maxCampaigns: plan.maxCampaigns,
+    maxRecipientsPerCampaign: plan.maxRecipientsPerCampaign,
+    watermark: plan.watermark,
+    campaignsUsed: totals?.total ?? 0,
+    campaignsRemaining: Math.max(0, plan.maxCampaigns - (totals?.total ?? 0)),
+  },
   });
 }
+
+// POST /api/admin/campaigns/:id/theme-image  (multipart, field "image")
+export async function uploadThemeImage(
+  request: Request,
+  env: Env,
+  campaignId: string,
+): Promise<Response> {
+  const { tenantId } = await requireAuth(request, env);
+  const campaign = await dbFirst<Campaign>(
+    env.DB,
+    "SELECT * FROM campaigns WHERE id = ? AND tenant_id = ?",
+    campaignId,
+    tenantId,
+  );
+  if (!campaign) throw new HttpError(404, "Campaign not found");
+
+  const form = await request.formData();
+  const raw = form.get("image");
+  if (raw === null || typeof raw === "string") throw new HttpError(400, "Missing 'image' file");
+  const file = raw as unknown as { size: number; type: string; arrayBuffer(): Promise<ArrayBuffer> };
+
+  if (file.size > 8 * 1024 * 1024) throw new HttpError(413, "Image must be ≤8 MB");
+  const allowed = ["image/jpeg", "image/png", "image/webp"];
+  if (!allowed.includes(file.type)) throw new HttpError(400, "Only JPG, PNG, or WebP");
+
+  const ext = file.type === "image/jpeg" ? "jpg" : file.type.split("/")[1];
+  const ts = now();
+  const key = `tenants/${tenantId}/campaigns/${campaignId}/theme-${ts}.${ext}`;
+
+  await env.IMAGES.put(key, await file.arrayBuffer(), {
+    httpMetadata: { contentType: file.type },
+  });
+  if (campaign.theme_image_key) {
+    await env.IMAGES.delete(campaign.theme_image_key).catch(() => { });
+  }
+  await dbRun(
+    env.DB,
+    "UPDATE campaigns SET theme_image_key = ?, theme_image_content_type = ?, updated_at = ? WHERE id = ?",
+    key,
+    file.type,
+    ts,
+    campaignId,
+  );
+  const updated = await dbFirst<Campaign>(env.DB, "SELECT * FROM campaigns WHERE id = ?", campaignId);
+  return json({
+    campaign: updated,
+    themeImageUrl: themeImageUrl(env, request, updated!),
+  });
+}
+
+// POST /api/admin/campaigns/:id/gift-image
+export async function uploadGiftImage(
+  request: Request,
+  env: Env,
+  campaignId: string,
+): Promise<Response> {
+  const { tenantId } = await requireAuth(request, env);
+  const campaign = await dbFirst<Campaign>(
+    env.DB,
+    "SELECT * FROM campaigns WHERE id = ? AND tenant_id = ?",
+    campaignId,
+    tenantId,
+  );
+  if (!campaign) throw new HttpError(404, "Campaign not found");
+
+  const form = await request.formData();
+  const raw = form.get("image");
+  if (raw === null || typeof raw === "string") throw new HttpError(400, "Missing 'image' file");
+  const file = raw as unknown as { size: number; type: string; arrayBuffer(): Promise<ArrayBuffer> };
+
+  if (file.size > 8 * 1024 * 1024) throw new HttpError(413, "Image must be ≤8 MB");
+  const allowed = ["image/jpeg", "image/png", "image/webp"];
+  if (!allowed.includes(file.type)) throw new HttpError(400, "Only JPG, PNG, or WebP");
+
+  const ext = file.type === "image/jpeg" ? "jpg" : file.type.split("/")[1];
+  const ts = now();
+  const key = `tenants/${tenantId}/campaigns/${campaignId}/gift-${ts}.${ext}`;
+  await env.IMAGES.put(key, await file.arrayBuffer(), {
+    httpMetadata: { contentType: file.type },
+  });
+  if (campaign.gift_image_key) {
+    await env.IMAGES.delete(campaign.gift_image_key).catch(() => { });
+  }
+  await dbRun(
+    env.DB,
+    "UPDATE campaigns SET gift_image_key = ?, gift_image_content_type = ?, updated_at = ? WHERE id = ?",
+    key,
+    file.type,
+    ts,
+    campaignId,
+  );
+  const updated = await dbFirst<Campaign>(env.DB, "SELECT * FROM campaigns WHERE id = ?", campaignId);
+  return json({
+    campaign: updated,
+    giftImageUrl: giftImageUrl(env, request, updated!),
+  });
+}
+
+// POST /api/admin/campaigns/:id/scene-image
+export async function uploadSceneImage(
+  request: Request,
+  env: Env,
+  campaignId: string,
+): Promise<Response> {
+  const { tenantId } = await requireAuth(request, env);
+  const campaign = await dbFirst<Campaign>(
+    env.DB,
+    "SELECT * FROM campaigns WHERE id = ? AND tenant_id = ?",
+    campaignId,
+    tenantId,
+  );
+  if (!campaign) throw new HttpError(404, "Campaign not found");
+
+  const form = await request.formData();
+  const raw = form.get("image");
+  if (raw === null || typeof raw === "string") throw new HttpError(400, "Missing 'image' file");
+  const file = raw as unknown as { size: number; type: string; arrayBuffer(): Promise<ArrayBuffer> };
+
+  if (file.size > 8 * 1024 * 1024) throw new HttpError(413, "Image must be ≤8 MB");
+  const allowed = ["image/jpeg", "image/png", "image/webp"];
+  if (!allowed.includes(file.type)) throw new HttpError(400, "Only JPG, PNG, or WebP");
+
+  const ext = file.type === "image/jpeg" ? "jpg" : file.type.split("/")[1];
+  const ts = now();
+  const key = `tenants/${tenantId}/campaigns/${campaignId}/scene-${ts}.${ext}`;
+  await env.IMAGES.put(key, await file.arrayBuffer(), {
+    httpMetadata: { contentType: file.type },
+  });
+  if (campaign.scene_image_key) {
+    await env.IMAGES.delete(campaign.scene_image_key).catch(() => { });
+  }
+  await dbRun(
+    env.DB,
+    "UPDATE campaigns SET scene_image_key = ?, scene_image_content_type = ?, updated_at = ? WHERE id = ?",
+    key,
+    file.type,
+    ts,
+    campaignId,
+  );
+  const updated = await dbFirst<Campaign>(env.DB, "SELECT * FROM campaigns WHERE id = ?", campaignId);
+  return json({
+    campaign: updated,
+    sceneImageUrl: sceneImageUrl(env, request, updated!),
+  });
+}
+

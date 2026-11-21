@@ -8,6 +8,8 @@ import {
   dbFirst,
   dbAll,
   dbRun,
+  PLANS,
+  PlanId,
 } from "./lib";
 
 async function bodyJson<T = Record<string, unknown>>(request: Request): Promise<T> {
@@ -25,11 +27,8 @@ const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])?$/;
 // POST /api/master/provision
 export async function postProvision(request: Request, env: Env): Promise<Response> {
   requireMaster(request, env);
-  const { slug, customerName, adminUsername, adminPassword } = await bodyJson<{
-    slug?: string;
-    customerName?: string;
-    adminUsername?: string;
-    adminPassword?: string;
+  const { slug, customerName, adminUsername, adminPassword, plan } = await bodyJson<{
+    slug?: string; customerName?: string; adminUsername?: string; adminPassword?: string; plan?: string;
   }>(request);
   if (!slug || !customerName || !adminUsername || !adminPassword) {
     throw new HttpError(400, "All fields are required");
@@ -46,6 +45,8 @@ export async function postProvision(request: Request, env: Env): Promise<Respons
     "SELECT id FROM tenants WHERE slug = ?",
     cleanSlug,
   );
+  const planId = (plan ?? "starter") as PlanId;
+  if (!(planId in PLANS)) throw new HttpError(400, `Invalid plan. Use one of: ${Object.keys(PLANS).join(", ")}`);
   if (exists) throw new HttpError(409, "Slug already taken");
 
   const id = crypto.randomUUID();
@@ -53,19 +54,13 @@ export async function postProvision(request: Request, env: Env): Promise<Respons
   const hash = await hashPassword(adminPassword);
   await dbRun(
     env.DB,
-    "INSERT INTO tenants (id, slug, customer_name, admin_username, admin_password_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)",
-    id,
-    cleanSlug,
-    customerName.trim(),
-    adminUsername.trim(),
-    hash,
-    ts,
-    ts,
+    "INSERT INTO tenants (id, slug, customer_name, admin_username, admin_password_hash, plan, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+    id, cleanSlug, customerName.trim(), adminUsername.trim(), hash, planId, ts, ts,
   );
 
   const origin = new URL(request.url).origin;
   return json({
-    tenant: { id, slug: cleanSlug, customerName: customerName.trim() },
+    tenant: { id, slug: cleanSlug, customerName: customerName.trim(), plan: planId },
     config: { apiUrl: origin, tenantSlug: cleanSlug },
   });
 }
@@ -83,9 +78,9 @@ export async function listTenants(request: Request, env: Env): Promise<Response>
     campaign_count: number;
   }>(
     env.DB,
-    `SELECT t.id, t.slug, t.customer_name, t.admin_username, t.status, t.created_at,
-            (SELECT COUNT(*) FROM campaigns c WHERE c.tenant_id = t.id) as campaign_count
-     FROM tenants t ORDER BY t.created_at DESC`,
+    `SELECT t.id, t.slug, t.customer_name, t.admin_username, t.plan, t.status, t.created_at,
+        (SELECT COUNT(*) FROM campaigns c WHERE c.tenant_id = t.id) as campaign_count
+      FROM tenants t ORDER BY t.created_at DESC`
   );
   return json({ tenants });
 }
@@ -110,7 +105,7 @@ export async function deleteTenant(
     "SELECT image_key FROM campaigns WHERE tenant_id = ? AND image_key IS NOT NULL",
     tenant.id,
   );
-  await Promise.all(keys.map((k) => env.IMAGES.delete(k.image_key!).catch(() => {})));
+  await Promise.all(keys.map((k) => env.IMAGES.delete(k.image_key!).catch(() => { })));
 
   // Cascade deletes handle campaigns, recipients, activity
   await dbRun(env.DB, "DELETE FROM tenants WHERE id = ?", tenant.id);
@@ -143,4 +138,32 @@ export async function resetTenantPassword(
     tenant.id,
   );
   return json({ ok: true });
+}
+
+// POST /api/master/tenants/:slug/plan { plan }
+export async function updateTenantPlan(
+  request: Request,
+  env: Env,
+  slug: string,
+): Promise<Response> {
+  requireMaster(request, env);
+  const { plan } = await bodyJson<{ plan?: string }>(request);
+  const planId = plan as PlanId;
+  if (!planId || !(planId in PLANS)) {
+    throw new HttpError(400, `Invalid plan. Use one of: ${Object.keys(PLANS).join(", ")}`);
+  }
+  const tenant = await dbFirst<{ id: string }>(
+    env.DB,
+    "SELECT id FROM tenants WHERE slug = ?",
+    slug,
+  );
+  if (!tenant) throw new HttpError(404, "Tenant not found");
+  await dbRun(
+    env.DB,
+    "UPDATE tenants SET plan = ?, updated_at = ? WHERE id = ?",
+    planId,
+    now(),
+    tenant.id,
+  );
+  return json({ ok: true, plan: planId });
 }
